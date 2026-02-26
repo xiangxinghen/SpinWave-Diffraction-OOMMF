@@ -1,0 +1,119 @@
+# MIF 2.2
+set pi [expr {acos(-1)}]
+
+# ---------- 1. 全局配置 ----------
+SetOptions {
+  basename "sw_diffraction"
+}
+
+# ---------- 2. 网格与几何定义 (1um x 2um) ----------
+Specify Oxs_BoxAtlas:atlas {
+  xrange {0 1e-6}
+  yrange {0 2e-6}
+  zrange {0 5e-9}
+}
+
+Specify Oxs_RectangularMesh:mesh {
+  cellsize {5e-9 5e-9 5e-9}
+  atlas :atlas
+}
+
+# ---------- 3. 材料与进化器 ----------
+Specify Oxs_UniformExchange { A 1.3e-11 }
+Specify Oxs_UniaxialAnisotropy {
+  K1 0.5e6
+  axis {0 0 1}
+}
+Specify Oxs_Demag {}
+
+# --- 吸收边界层 ---
+proc RectangularMaskedDamping { xrel yrel zrel } {
+  set alpha_min 0.01
+  set alpha_max 1.0
+  set thickness 0.1
+  set dx [expr {$xrel < 0.5 ? $xrel : 1.0 - $xrel}]
+  set dy [expr {$yrel < 0.5 ? $yrel : 1.0 - $yrel}]
+  set d_min [expr {$dx < $dy ? $dx : $dy}]
+
+  if {$d_min < $thickness} {
+    set scaling [expr {($thickness - $d_min) / $thickness}]
+    return [expr {$alpha_min + ($alpha_max - $alpha_min) * $scaling}]
+  }
+  return $alpha_min
+}
+
+Specify Oxs_ScriptScalarField:alpha_field {
+  atlas :atlas
+  script_args {relpt}
+  script RectangularMaskedDamping
+}
+
+Specify Oxs_RungeKuttaEvolve:evolver {
+  alpha :alpha_field
+}
+
+# ---------- 4. 物理几何：设置衍射狭缝 ----------
+proc SlitGeometry { xrel yrel zrel } {
+  set Ms 8e5
+  # 在 y 轴约 0.4um 处设置障碍墙 (yrel = 0.2)
+  if {$yrel > 0.19 && $yrel < 0.21} {
+    # 在中心开一个 100nm 宽的缝 (xrel 从 0.45 到 0.55)
+    if {$xrel < 0.45 || $xrel > 0.55} {
+      return 0
+    }
+  }
+  return $Ms
+}
+
+Specify Oxs_ScriptScalarField:Ms_Field {
+  atlas :atlas
+  script_args {relpt}
+  script SlitGeometry
+}
+
+# ---------- 5. 激励源 (底部线形波源) ----------
+proc ExcitationProc { xrel yrel zrel } {
+  # 在底部边缘激发
+  if {$yrel < 0.05} {
+    return [list 1.0 0 0]
+  }
+  return [list 0 0 0]
+}
+
+Specify Oxs_ScriptVectorField:spatial_mask {
+  atlas :atlas
+  script_args {relpt}
+  script ExcitationProc
+}
+
+proc ripple_transform { stage stage_time total_time } {
+  global pi
+  set f 15e9 
+  set Amp 2.0e5
+  set val [expr {$Amp * sin(2.0 * $pi * $f * $total_time)}]
+  set dval [expr {$Amp * 2.0 * $pi * $f * cos(2.0 * $pi * $f * $total_time)}]
+  return [list $val 1.0 1.0 $dval 0.0 0.0]
+}
+
+Specify Oxs_TransformZeeman:ripple_source {
+  field :spatial_mask
+  type diagonal
+  script ripple_transform
+  script_args {stage stage_time total_time}
+}
+
+# ---------- 6. 驱动器与保存 ----------
+Specify Oxs_TimeDriver {
+  evolver :evolver
+  mesh :mesh
+  Ms :Ms_Field
+  m0 {0 0 1}
+  stopping_time 5e-12
+  stage_count 400
+}
+
+Destination archive mmArchive
+Destination mmDisp mmDisp
+
+Schedule "Oxs_TimeDriver::Magnetization" archive Stage 1
+Schedule "Oxs_TimeDriver::Magnetization" mmDisp Stage 1
